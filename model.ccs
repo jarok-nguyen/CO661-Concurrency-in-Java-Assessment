@@ -1,0 +1,20 @@
+Program = MyServer | (Clients.Clients.Clients.Clients); 
+
+MyServer = ServeRead + ServeWrite;
+ServeRead = ReadSem4 + WriteLock;
+
+Clients = Client | Client | Client | Client;
+
+* A client may either read or write
+Client = ReadClient + WriteClient;
+ReadClient = 'acquire.'read.'release.Client;
+WriteClient = 'lock.'write.'unlock.Client;
+
+* One write lock for each file
+WriteLock = lock.unlock.WriteLock;
+
+* Each file has a semaphore with 4 permits
+ReadSem4 = (ReadSem1.ReadSem4) | ReadSem3; 
+ReadSem3 = (ReadSem1.ReadSem3) | ReadSem2; 
+ReadSem2 = (ReadSem1.ReadSem1) | ReadSem1; 
+ReadSem1 = acquire.release.ReadSem1;
