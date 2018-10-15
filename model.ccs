@@ -1,16 +1,12 @@
-Program = MyServer | (Clients.Clients.Clients.Clients.Clients); 
+App = (Client | Client | Client | Client | Client | Client | Client | Client | Server) \ {a, b, c, d, e, lockw, lockr, filew, filer, closew, closer, unlockw, unlockr};
+ 
+Server = ((ServeR1 | ServeR2 | ServeR3 | ServeR4) + ServeW) | ((a.b.c.d.Server) + (e.Server));
+ServeR1 = lockr.'filer.closer.unlockr.'a.0;
+ServeR2 = lockr.'filer.closer.unlockr.'b.0;
+ServeR3 = lockr.'filer.closer.unlockr.'c.0;
+ServeR4 = lockr.'filer.closer.unlockr.'d.0;
+ServeW = lockw.'filew.closew.unlockw.'e.0;
 
-MyServer = (ServeRead | ReadLock | ServeRead | ReadLock | ServeRead | ReadLock | ServeRead | ReadLock) + ServeWrite;
-ServeRead = 'lockr.'read.'unlockr.ServeRead;
-ServeWrite = 'lockw.'write.'unlockw.ServeWrite;
-
-Clients = Client | Client | Client | Client;
-
-* A client may either read or write
-Client = ReadClient + WriteClient;
-ReadClient = 'lockr.'read.'unlockr.Client;
-WriteClient = 'lockw.'write.'unlockw.Client;
-
-* One write lock for each file
-WriteLock = lock.unlock.WriteLock;
-ReadLock = lock.unlock.ReadLock;
+Client = ClientR + ClientW;
+ClientW = 'lockw.filew.'unlockw.Client;
+ClientR = 'lockr.filer.'unlockr.Client;
