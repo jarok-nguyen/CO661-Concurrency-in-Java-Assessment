@@ -1,12 +1,23 @@
-App = (Client | Client | Client | Client | Client | Client | Client | Client | Server) \ {a, b, c, d, e, lockw, lockr, filew, filer, closew, closer, unlockw, unlockr};
- 
-Server = ((ServeR1 | ServeR2 | ServeR3 | ServeR4) + ServeW) | ((a.b.c.d.Server) + (e.Server));
-ServeR1 = lockr.'filer.closer.unlockr.'a.0;
-ServeR2 = lockr.'filer.closer.unlockr.'b.0;
-ServeR3 = lockr.'filer.closer.unlockr.'c.0;
-ServeR4 = lockr.'filer.closer.unlockr.'d.0;
-ServeW = lockw.'filew.closew.unlockw.'e.0;
+* The following model demonstrates an application with 8 clients (the number here is arbitrary - it could be any natural number) interacting with a single server
+* \ {...} ensures that the communication is "private" i.e.: it only occurs using tau transitions (handshaking)
+App = (Client | Client | Client | Client | Client | Client | Client | Client | Server) \ {lockw, lockr, filew, filer, closew, closer, unlockw, unlockr};
 
+* The server EITHER servers 4 reading clients (ClientR) or a single writing client (ClientW) before moving the next iteration (here implemented using a recursive call). 
+* I am ensuring that the server waits for all readers or a single writer to finish by forcing them to synchronise on: 4 x "lockr" (readers) and "lockw" (writers).
+Server = ((ServeR1 | ServeR2 | ServeR3 | ServeR4) + ServeW) | ((unlockr.unlockr.unlockr.unlockr.Server) + (unlockw.Server));
+
+* ServerRn corresponds to Serving the n^th client who is requesting read access
+* "filer" means: "Send the file in read mode to the requesting client". 
+ServeR1 = lockr.'filer.closer.0;
+ServeR2 = lockr.'filer.closer.0;
+ServeR3 = lockr.'filer.closer.0;
+ServeR4 = lockr.'filer.closer.0;
+
+* the unlockw needs to be sent to the server to signal that this client is done and the server can move to the next "iteration".
+* "filew" means: "Send the file in write mode to the requesting client". 
+ServeW = lockw.'filew.closew.0;
+
+* a client can either request a read or write access
 Client = ClientR + ClientW;
-ClientW = 'lockw.filew.'unlockw.Client;
-ClientR = 'lockr.filer.'unlockr.Client;
+ClientW = 'lockw.filew.'closew.'unlockw.Client;
+ClientR = 'lockr.filer.'closer.'unlockr.Client;
