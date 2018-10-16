@@ -3,7 +3,7 @@
 App = (Client | Client | Client | Client | Client | Client | Client | Client | Server) \ {lockw, lockr, filew, filer, closew, closer, unlockw, unlockr};
 
 * The server EITHER servers 4 reading clients (ClientR) or a single writing client (ClientW) before moving the next iteration (here implemented using a recursive call). 
-* I am ensuring that the server waits for all readers or a single writer to finish by forcing them to synchronise on: 4 x "lockr" (readers) and "lockw" (writers).
+* I am ensuring that the server waits for all readers or a single writer to finish by forcing them to synchronise on: 4 x "lockr" (readers) and "lockw" (writers). The "lock" signals are sent by the clients at the end of reading / writing. The 4-client approach is meant to act as a semaphore (4 permits, clients return them when they are done reading) whilst the exclusive access for the write client is similar to a lock.
 Server = ((ServeR1 | ServeR2 | ServeR3 | ServeR4) + ServeW) | ((unlockr.unlockr.unlockr.unlockr.Server) + (unlockw.Server));
 
 * ServerRn corresponds to Serving the n^th client who is requesting read access
