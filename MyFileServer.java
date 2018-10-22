@@ -2,7 +2,6 @@ import java.util.HashMap;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
@@ -57,12 +56,12 @@ import static java.lang.String.format;
 
 public class MyFileServer implements FileServer {
 
-    class Triplet {
+    class Wrapper {
         String content;
         final Semaphore semaphore = new Semaphore(NO_READERS, true);
         final ReentrantLock lock = new ReentrantLock(true);
 
-        Triplet(final String content) {
+        Wrapper(final String content) {
             this.content = content;
         }
 
@@ -75,7 +74,7 @@ public class MyFileServer implements FileServer {
         }
     }
 
-    private final HashMap<String, Triplet> files = new HashMap<>();
+    private final HashMap<String, Wrapper> files = new HashMap<>();
 
     // reading permits
     private static final int NO_READERS = 4;
@@ -87,7 +86,7 @@ public class MyFileServer implements FileServer {
     public final void create(final String filename, final String content) {
         log.info(format("creating file %s", filename));
         synchronized (files) {
-            files.put(filename, new Triplet(content));
+            files.put(filename, new Wrapper(content));
         }
     }
 
@@ -102,106 +101,97 @@ public class MyFileServer implements FileServer {
             return Optional.empty();
         }
 
-        final Triplet triplet = files.get(filename);
+        log.info(format("located %s in the file server", filename));
 
-        synchronized (triplet) {
+        switch (mode) {
+            case READABLE:
+                try {
+                    files.get(filename).semaphore.acquire();
+                } catch (final InterruptedException e) {
+                    e.printStackTrace();
+                    Thread.currentThread().interrupt();
+                }
+                break;
+            case READWRITEABLE:
+                try {
+                    // wait until nobody is reading
+                    files.get(filename).semaphore.acquire(NO_READERS);
+                } catch (final InterruptedException e) {
+                    e.printStackTrace();
+                    Thread.currentThread().interrupt();
+                }
+                // wait until nobody is writing
+                files.get(filename).lock.lock();
+                break;
+            default:
+                log.warning(format("trying to open in %s mode", mode.name()));
+                return Optional.empty();
 
-            log.info(format("located %s in the file server", filename));
-
-            switch (mode) {
-                case READABLE:
-                    try {
-                        triplet.semaphore.acquire();
-                    } catch (final InterruptedException e) {
-                        e.printStackTrace();
-                        Thread.currentThread().interrupt();
-                    }
-                    break;
-                case READWRITEABLE:
-                    try {
-                        // wait until nobody is reading
-                        triplet.semaphore.acquire(NO_READERS);
-                    } catch (final InterruptedException e) {
-                        e.printStackTrace();
-                        Thread.currentThread().interrupt();
-                    }
-                    // wait until nobody is writing
-                    triplet.lock.lock();
-                    break;
-                default:
-                    log.warning(format("trying to open in %s mode", mode.name()));
-                    return Optional.empty();
-
-            }
-            return Optional.of(new File(filename, triplet.getContent(), mode));
         }
+        return Optional.of(new File(filename, files.get(filename).getContent(), mode));
     }
 
     @Override
     public void close(final File file) {
         log.info(format("closing file %s", file));
-        final Triplet triplet = files.get(file.filename());
-        synchronized (triplet) {
-            switch (this.fileStatus(file.filename())) {
-                case READABLE:
-                    if (triplet.semaphore.availablePermits() < NO_READERS) {
-                        triplet.semaphore.release();
-                        log.info(format("released a semaphore for %s", file.filename()));
-                    } else try {
-                        throw new Exception("tried to release a semaphore more than once");
-                    } catch (final Exception e) {
-                        e.printStackTrace();
-                    }
-                    return;
-                case READWRITEABLE:
-                    try {
-                        if (triplet.semaphore.availablePermits() != 0) {
-                            throw new Exception(format("was expecting number of semaphore permits for %s to be 0 but was %d", file.filename(), triplet.semaphore.availablePermits()));
-                        } else if (!triplet.lock.isLocked()) {
-                            throw new Exception(format("was expecting the write lock for %s to be locked but it wasn't!", file.filename()));
-                        } else {
-                            log.info(format("applying changes to file %s", file.filename()));
-                            triplet.setContent(file.read());
-                            triplet.semaphore.release(NO_READERS);
-                            log.info(format("released %s semaphores for %s", NO_READERS, file.filename()));
-                            triplet.lock.unlock();
-                            log.info(format("unlocked writing for %s", file.filename()));
-                        }
-                    } catch (final Exception e) {
-                        e.printStackTrace();
-                    }
-                    return;
-                default:
-                    try {
-                        throw new Exception(String.format("trying to close %s in %s mode", file.filename(), file.mode()));
-                    } catch (final Exception e) {
-                        e.printStackTrace();
-                    }
-                    return;
 
-            }
+        final Wrapper wrapper = files.get(file.filename());
+
+        switch (fileStatus(file.filename())) {
+            case READABLE:
+                if (wrapper.semaphore.availablePermits() < NO_READERS) {
+                    wrapper.semaphore.release();
+                    log.info(format("released a semaphore for %s", file.filename()));
+                } else try {
+                    throw new Exception("tried to release a semaphore more than once");
+                } catch (final Exception e) {
+                    e.printStackTrace();
+                }
+                return;
+            case READWRITEABLE:
+                try {
+                    if (wrapper.semaphore.availablePermits() != 0) {
+                        throw new Exception(format("was expecting number of semaphore permits for %s to be 0 but was %d", file.filename(), wrapper.semaphore.availablePermits()));
+                    } else if (!wrapper.lock.isLocked()) {
+                        throw new Exception(format("was expecting the write lock for %s to be locked but it wasn't!", file.filename()));
+                    } else {
+                        log.info(format("applying changes to file %s", file.filename()));
+                        wrapper.setContent(file.read());
+                        wrapper.semaphore.release(NO_READERS);
+                        log.info(format("released %s semaphores for %s", NO_READERS, file.filename()));
+                        wrapper.lock.unlock();
+                        log.info(format("unlocked writing for %s", file.filename()));
+                    }
+                } catch (final Exception e) {
+                    e.printStackTrace();
+                }
+                return;
+            default:
+                try {
+                    throw new Exception(String.format("trying to close %s in %s mode", file.filename(), file.mode()));
+                } catch (final Exception e) {
+                    e.printStackTrace();
+                }
+                return;
+
         }
     }
 
     @Override
     public Mode fileStatus(final String filename) {
         log.info(format("requesting file %s status", filename));
-        synchronized (files) {
-            if (files.containsKey(filename)) {
-                final Triplet triplet = files.get(filename);
-                if (triplet.semaphore.availablePermits() == NO_READERS) return Mode.CLOSED;
-                else if (triplet.lock.isLocked()) return Mode.READWRITEABLE;
-                else return Mode.READABLE;
-            } else return Mode.UNKNOWN;
-        }
+        if (files.containsKey(filename)) {
+            final Wrapper wrapper = files.get(filename);
+            if (wrapper.semaphore.availablePermits() == NO_READERS) return Mode.CLOSED;
+            else if (wrapper.lock.isLocked()) return Mode.READWRITEABLE;
+            else return Mode.READABLE;
+        } else return Mode.UNKNOWN;
     }
 
     @Override
     public Set<String> availableFiles() {
         log.info("requesting all file names");
-        synchronized (files) {
-            return files.keySet();
-        }
+        return files.keySet();
     }
 
     @Override

@@ -56,6 +56,8 @@ public class Client extends Thread {
                     log.info(String.format("%s successfully wrote %d bytes to file \"%s\"", toString(), content.length(), file.filename()));
                     break;
             }
+
+            server.close(file);
         }
     }
 
