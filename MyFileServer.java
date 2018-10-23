@@ -1,11 +1,15 @@
-import java.util.HashMap;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 import static java.lang.String.format;
+import static java.lang.System.setProperty;
+import static java.lang.Thread.currentThread;
 
 /**
  * This implementation of `FileServer` ensures fairness and avoids races. It
@@ -50,19 +54,35 @@ import static java.lang.String.format;
  * Additionally, attempting to open a file in a mode undefined by the
  * specification (i.e. the assessment instructions) results in failure which
  * here is basically returning of the empty `Optional`.
+ * <p>
+ * <p>
+ * FIXME track who opens a file for reading / writing: use thread id, ensure that if, say, 3 threads request READ mode, then one of them can't close 3 times
  *
  * @author nl253
  */
 
-public class MyFileServer implements FileServer {
+public final class MyFileServer implements FileServer {
 
-    class Wrapper {
+    final class Wrapper {
         String content;
         final Semaphore semaphore = new Semaphore(NO_READERS, true);
         final ReentrantLock lock = new ReentrantLock(true);
+        // make sure that the same writer doesn't close > 1
+        Optional<Long> writer = Optional.empty();
+        // make sure that the same reader doesn't close > 1
+        final TreeSet<Long> readers = new TreeSet<>();
+
 
         Wrapper(final String content) {
             this.content = content;
+        }
+
+        void setWriter(final Long writer) {
+            this.writer = Optional.ofNullable(writer);
+        }
+
+        public Optional<Long> getWriter() {
+            return writer;
         }
 
         String getContent() {
@@ -74,106 +94,113 @@ public class MyFileServer implements FileServer {
         }
     }
 
-    private final HashMap<String, Wrapper> files = new HashMap<>();
+    private final ConcurrentHashMap<String, Wrapper> files = new ConcurrentHashMap<>();
 
     // reading permits
     private static final int NO_READERS = 4;
 
     private final Logger log = Logger.getAnonymousLogger();
 
-
-    @Override
-    public final void create(final String filename, final String content) {
-        log.info(format("creating file %s", filename));
-        synchronized (files) {
-            files.put(filename, new Wrapper(content));
-        }
+    /**
+     * @return Worker ID
+     */
+    private String wid() {
+        return String.format("#%d", currentThread().getId());
     }
 
-    @SuppressWarnings("AlibabaSwitchStatement")
     @Override
-    public final Optional<File> open(final String filename, final Mode mode) {
-        log.info(format("opening %s in %s mode", filename, mode.name()));
-        if (!files.containsKey(filename)) try {
-            throw new Exception(format("failed to locate %s", filename));
-        } catch (final Exception e) {
-            e.printStackTrace();
+    public void create(final String filename, final String content) {
+        log.info(format("creating \"%s\"", filename));
+        files.put(filename, new Wrapper(content));
+    }
+
+    @Override
+    public Optional<File> open(final String filename, final Mode mode) {
+        log.info(format("opening \"%s\" in %s mode", filename, mode.name()));
+
+        if (!files.containsKey(filename)) {
+            log.warning(format("failed to locate \"%s\"", filename));
+            return Optional.empty();
+        } else if (!(mode.equals(Mode.READWRITEABLE) || mode.equals(Mode.READABLE))) {
+            log.warning(format("%s failed to open \"%s\" in %s mode", currentThread().toString(), filename, mode.name()));
             return Optional.empty();
         }
 
-        log.info(format("located %s in the file server", filename));
+        log.info(format("located \"%s\" in the file server", filename));
 
-        switch (mode) {
-            case READABLE:
-                try {
-                    files.get(filename).semaphore.acquire();
-                } catch (final InterruptedException e) {
-                    e.printStackTrace();
-                    Thread.currentThread().interrupt();
-                }
-                break;
-            case READWRITEABLE:
-                try {
-                    // wait until nobody is reading
-                    files.get(filename).semaphore.acquire(NO_READERS);
-                } catch (final InterruptedException e) {
-                    e.printStackTrace();
-                    Thread.currentThread().interrupt();
-                }
-                // wait until nobody is writing
-                files.get(filename).lock.lock();
-                break;
-            default:
-                log.warning(format("trying to open in %s mode", mode.name()));
-                return Optional.empty();
+        final Wrapper wrapper = files.get(filename);
 
+        if (mode.equals(Mode.READABLE)) {
+            try {
+                wrapper.semaphore.acquire();
+                wrapper.readers.add(currentThread().getId());
+                log.info(format("#%d registered as a reader", currentThread().getId()));
+            } catch (final InterruptedException e) {
+                e.printStackTrace();
+                currentThread().interrupt();
+            }
+            return Optional.of(new File(filename, wrapper.getContent(), Mode.READABLE));
+        } else if (mode.equals(Mode.READWRITEABLE)) {
+            try {
+                wrapper.semaphore.acquire(NO_READERS);
+            } catch (final InterruptedException e) {
+                e.printStackTrace();
+                currentThread().interrupt();
+            }
+            wrapper.lock.lock();
+            wrapper.setWriter(currentThread().getId());
+            log.info(format("#%d registered as a writer", currentThread().getId()));
         }
-        return Optional.of(new File(filename, files.get(filename).getContent(), mode));
+        return Optional.of(new File(filename, wrapper.getContent(), mode));
     }
 
     @Override
     public void close(final File file) {
-        log.info(format("closing file %s", file));
+        synchronized (file) {
 
-        final Wrapper wrapper = files.get(file.filename());
+            final Mode mode = fileStatus(file.filename());
 
-        switch (fileStatus(file.filename())) {
-            case READABLE:
-                if (wrapper.semaphore.availablePermits() < NO_READERS) {
+            log.info(format("#%s requesting to close \"%s\" which is in %s mode", currentThread().getId(), file.filename(), mode.name()));
+
+            // worker id
+
+            if (mode == Mode.READABLE) {
+                final Wrapper wrapper = files.get(file.filename());
+                if (wrapper.readers.contains(currentThread().getId())) {
+
+                    log.info(format("de-registering reader %s for \"%s\"", wid(), file.filename()));
+                    wrapper.readers.remove(currentThread().getId());
+
+                    log.info(format("%s releasing a semaphore for \"%s\"", wid(), file.filename()));
                     wrapper.semaphore.release();
-                    log.info(format("released a semaphore for %s", file.filename()));
-                } else try {
-                    throw new Exception("tried to release a semaphore more than once");
-                } catch (final Exception e) {
-                    e.printStackTrace();
-                }
-                return;
-            case READWRITEABLE:
-                try {
-                    if (wrapper.semaphore.availablePermits() != 0) {
-                        throw new Exception(format("was expecting number of semaphore permits for %s to be 0 but was %d", file.filename(), wrapper.semaphore.availablePermits()));
-                    } else if (!wrapper.lock.isLocked()) {
-                        throw new Exception(format("was expecting the write lock for %s to be locked but it wasn't!", file.filename()));
-                    } else {
-                        log.info(format("applying changes to file %s", file.filename()));
-                        wrapper.setContent(file.read());
-                        wrapper.semaphore.release(NO_READERS);
-                        log.info(format("released %s semaphores for %s", NO_READERS, file.filename()));
-                        wrapper.lock.unlock();
-                        log.info(format("unlocked writing for %s", file.filename()));
-                    }
-                } catch (final Exception e) {
-                    e.printStackTrace();
-                }
-                return;
-            default:
-                try {
-                    throw new Exception(String.format("trying to close %s in %s mode", file.filename(), file.mode()));
-                } catch (final Exception e) {
-                    e.printStackTrace();
-                }
-                return;
 
+                } else {
+                    log.warning(format("%s tried to release a semaphore for \"%s\" more than once", wid(), file.filename()));
+                }
+            } else if (mode == Mode.READWRITEABLE) {
+                final Wrapper wrapper = files.get(file.filename());
+                if (wrapper.getWriter().map(w -> w.equals(currentThread().getId())).orElse(false)) {
+
+                    log.info(format("de-registering writer %s for \"%s\"", wid(), file.filename()));
+                    wrapper.setWriter(null);
+
+                    log.info(format("%s applying changes to \"%s\"", wid(), file.filename()));
+                    wrapper.setContent(file.read());
+
+                    log.info(format("%s releasing %s semaphores for \"%s\"", wid(), NO_READERS, file.filename()));
+                    wrapper.semaphore.release(NO_READERS);
+
+                    log.info(format("%s unlocking writing for \"%s\"", wid(), file.filename()));
+                    wrapper.lock.unlock();
+
+                } else if (wrapper.getWriter().isPresent()) {
+                    log.warning(format("%s already closed this file, a different writer %s is writing to \"%s\" now", wid(), wrapper.getWriter().get(), file.filename()));
+
+                } else log.warning(format("%s already closed \"%s\"", wid(), file.filename()));
+
+            } else if (mode == Mode.CLOSED) {
+                log.warning(format("%s failed to re-close a closed file \"%s\"", wid(), file.filename()));
+            }
         }
     }
 
@@ -182,10 +209,15 @@ public class MyFileServer implements FileServer {
         log.info(format("requesting file %s status", filename));
         if (files.containsKey(filename)) {
             final Wrapper wrapper = files.get(filename);
-            if (wrapper.semaphore.availablePermits() == NO_READERS) return Mode.CLOSED;
-            else if (wrapper.lock.isLocked()) return Mode.READWRITEABLE;
-            else return Mode.READABLE;
-        } else return Mode.UNKNOWN;
+            synchronized (wrapper) {
+                if (wrapper.semaphore.availablePermits() == NO_READERS) return Mode.CLOSED;
+                else if (wrapper.lock.isLocked()) return Mode.READWRITEABLE;
+                else return Mode.READABLE;
+            }
+        } else {
+            log.warning(format("\"%s\" neither in READABLE nor READWRITEABLE nor CLOSED mode", filename));
+            return Mode.UNKNOWN;
+        }
     }
 
     @Override
@@ -195,7 +227,7 @@ public class MyFileServer implements FileServer {
     }
 
     @Override
-    public final String toString() {
+    public String toString() {
         return format("MyFileServer with %s files", files.size());
     }
 }
