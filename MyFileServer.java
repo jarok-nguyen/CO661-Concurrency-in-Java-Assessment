@@ -1,15 +1,15 @@
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 import static java.lang.String.format;
-import static java.lang.System.setProperty;
 import static java.lang.Thread.currentThread;
+import static java.lang.Thread.onSpinWait;
 
 /**
  * This implementation of `FileServer` ensures fairness and avoids races. It
@@ -68,20 +68,20 @@ public final class MyFileServer implements FileServer {
         final Semaphore semaphore = new Semaphore(NO_READERS, true);
         final ReentrantLock lock = new ReentrantLock(true);
         // make sure that the same writer doesn't close > 1
-        Optional<Long> writer = Optional.empty();
+        Optional<Thread> writer = Optional.empty();
         // make sure that the same reader doesn't close > 1
-        final TreeSet<Long> readers = new TreeSet<>();
+        final Set<Thread> readers = new HashSet<>();
 
 
         Wrapper(final String content) {
             this.content = content;
         }
 
-        void setWriter(final Long writer) {
+        void setWriter(final Thread writer) {
             this.writer = Optional.ofNullable(writer);
         }
 
-        public Optional<Long> getWriter() {
+        Optional<Thread> getWriter() {
             return writer;
         }
 
@@ -92,6 +92,11 @@ public final class MyFileServer implements FileServer {
         void setContent(final String newContent) {
             this.content = newContent;
         }
+
+        @Override
+        public String toString() {
+            return format("Wrapper reading permits are [%d/%d], writer is %s", NO_READERS - readers.size(), NO_READERS, writer.map(w -> "" + w.getId()).orElse("<empty>"));
+        }
     }
 
     private final ConcurrentHashMap<String, Wrapper> files = new ConcurrentHashMap<>();
@@ -99,13 +104,10 @@ public final class MyFileServer implements FileServer {
     // reading permits
     private static final int NO_READERS = 4;
 
-    private final Logger log = Logger.getAnonymousLogger();
+    private final Logger log = Logger.getLogger(format("%s logger", getClass().getSimpleName()));
 
-    /**
-     * @return Worker ID
-     */
     private String wid() {
-        return String.format("#%d", currentThread().getId());
+        return String.format("Thread #%d", currentThread().getId());
     }
 
     @Override
@@ -116,7 +118,7 @@ public final class MyFileServer implements FileServer {
 
     @Override
     public Optional<File> open(final String filename, final Mode mode) {
-        log.info(format("opening \"%s\" in %s mode", filename, mode.name()));
+        log.info(format("request top open \"%s\" in %s mode", filename, mode.name()));
 
         if (!files.containsKey(filename)) {
             log.warning(format("failed to locate \"%s\"", filename));
@@ -126,14 +128,14 @@ public final class MyFileServer implements FileServer {
             return Optional.empty();
         }
 
-        log.info(format("located \"%s\" in the file server", filename));
 
         final Wrapper wrapper = files.get(filename);
+        log.info(format("located %s in the file server", wrapper.toString()));
 
         if (mode.equals(Mode.READABLE)) {
             try {
                 wrapper.semaphore.acquire();
-                wrapper.readers.add(currentThread().getId());
+                wrapper.readers.add(currentThread());
                 log.info(format("#%d registered as a reader", currentThread().getId()));
             } catch (final InterruptedException e) {
                 e.printStackTrace();
@@ -148,7 +150,7 @@ public final class MyFileServer implements FileServer {
                 currentThread().interrupt();
             }
             wrapper.lock.lock();
-            wrapper.setWriter(currentThread().getId());
+            wrapper.setWriter(currentThread());
             log.info(format("#%d registered as a writer", currentThread().getId()));
         }
         return Optional.of(new File(filename, wrapper.getContent(), mode));
@@ -166,32 +168,39 @@ public final class MyFileServer implements FileServer {
 
             if (mode == Mode.READABLE) {
                 final Wrapper wrapper = files.get(file.filename());
-                if (wrapper.readers.contains(currentThread().getId())) {
+                log.info(format("found %s", wrapper.toString()));
 
-                    log.info(format("de-registering reader %s for \"%s\"", wid(), file.filename()));
-                    wrapper.readers.remove(currentThread().getId());
+                if (wrapper.readers.contains(currentThread())) {
 
-                    log.info(format("%s releasing a semaphore for \"%s\"", wid(), file.filename()));
-                    wrapper.semaphore.release();
+                    synchronized (wrapper) {
+
+                        log.info(format("de-registering reader %s for \"%s\"", wid(), file.filename()));
+                        wrapper.readers.remove(currentThread());
+
+                        log.info(format("%s releasing a semaphore for \"%s\"", wid(), file.filename()));
+                        wrapper.semaphore.release();
+                    }
 
                 } else {
                     log.warning(format("%s tried to release a semaphore for \"%s\" more than once", wid(), file.filename()));
                 }
             } else if (mode == Mode.READWRITEABLE) {
                 final Wrapper wrapper = files.get(file.filename());
-                if (wrapper.getWriter().map(w -> w.equals(currentThread().getId())).orElse(false)) {
+                log.info(format("found %s", wrapper.toString()));
+                if (wrapper.getWriter().map(w -> w.equals(currentThread())).orElse(false)) {
+                    synchronized (wrapper) {
+                        log.info(format("de-registering writer %s for \"%s\"", wid(), file.filename()));
+                        wrapper.setWriter(null);
 
-                    log.info(format("de-registering writer %s for \"%s\"", wid(), file.filename()));
-                    wrapper.setWriter(null);
+                        log.info(format("%s applying changes to \"%s\"", wid(), file.filename()));
+                        wrapper.setContent(file.read());
 
-                    log.info(format("%s applying changes to \"%s\"", wid(), file.filename()));
-                    wrapper.setContent(file.read());
+                        log.info(format("%s releasing %s semaphores for \"%s\"", wid(), NO_READERS, file.filename()));
+                        wrapper.semaphore.release(NO_READERS);
 
-                    log.info(format("%s releasing %s semaphores for \"%s\"", wid(), NO_READERS, file.filename()));
-                    wrapper.semaphore.release(NO_READERS);
-
-                    log.info(format("%s unlocking writing for \"%s\"", wid(), file.filename()));
-                    wrapper.lock.unlock();
+                        log.info(format("%s unlocking writing for \"%s\"", wid(), file.filename()));
+                        wrapper.lock.unlock();
+                    }
 
                 } else if (wrapper.getWriter().isPresent()) {
                     log.warning(format("%s already closed this file, a different writer %s is writing to \"%s\" now", wid(), wrapper.getWriter().get(), file.filename()));
@@ -209,6 +218,7 @@ public final class MyFileServer implements FileServer {
         log.info(format("requesting file %s status", filename));
         if (files.containsKey(filename)) {
             final Wrapper wrapper = files.get(filename);
+            log.info(format("found %s", wrapper.toString()));
             synchronized (wrapper) {
                 if (wrapper.semaphore.availablePermits() == NO_READERS) return Mode.CLOSED;
                 else if (wrapper.lock.isLocked()) return Mode.READWRITEABLE;
@@ -222,12 +232,12 @@ public final class MyFileServer implements FileServer {
 
     @Override
     public Set<String> availableFiles() {
-        log.info("requesting all file names");
+        log.info(format("%s requesting all file names", wid()));
         return files.keySet();
     }
 
     @Override
     public String toString() {
-        return format("MyFileServer with %s files", files.size());
+        return format("%s with %s files", getClass().getSimpleName(), files.size());
     }
 }
