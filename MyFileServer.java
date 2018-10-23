@@ -1,5 +1,4 @@
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -9,30 +8,24 @@ import java.util.logging.Logger;
 
 import static java.lang.String.format;
 import static java.lang.Thread.currentThread;
-import static java.lang.Thread.onSpinWait;
 
 /**
  * This implementation of `FileServer` ensures fairness and avoids races. It
  * does so in the following ways. A `ReentrantLock` AND a `Semaphore` is created
- * for every file.
- * <p>
- * See `files`, there is always a single lock and a single semaphore for the ith
- * file stored in locks in the ith index and semaphores in the ith index
- * respectively.
+ * for every file. The system keeps tracks of the readers (in a set) and writers (single filed since there is only one writer for every file)
+ * so that a situation where someone closes twice is avoided.
  * <p>
  * There are essentially two nested "critical sections" with the "writing
  * section" being inside the "reading section". To enter the "reading critical
  * section" you must acquire a Semaphore. To enter the "writing section" you
  * must first ensure there is nobody else in the reading section AND there is
  * nobody else in the "writing section" (i.e. you have exclusive access).
- * <p>
- * NOTE that there are by default only 4 permits for reading (but it could be
- * increased to any number >1 at the cost of performance).
- * <p>
  * If a reader (client that wishes to read a file i.e. open it in READ mode)
  * requests access and there is a permit available, it will be given read access
- * to the file. This is designed in such a way that if another has opened the
- * file for writing, it will have acquired all the permits (see below). In this
+ * to the file.
+ * <p>
+ * This is designed in such a way that if another has opened the
+ * file for writing, it will have acquired all the permits . In this
  * way you can only have one writer or any number of readers at any time.
  * <p>
  * To enter the "writing critical section" you must both acquire all permits
@@ -46,17 +39,26 @@ import static java.lang.Thread.onSpinWait;
  * which in turn ensures there is only one client writing at a time (prevents
  * multiple writes to the same file).
  * <p>
+ * NOTE that there are by default only 4 permits for reading for every file (but it could be
+ * increased to any number >1 but it would probably cause performance penalty if the number > #CPU_CORES).
+ * <p>
+ * E.g.: Assume the system is running.
+ * 1. There is a file "abc.txt" on the server.
+ * 2. We create and start 2 reader additional threads that attempt to open the file "abc.txt".
+ * 3. The limit for the semaphore is 4 readers but at present 2 other threads (in addition to those two) are reading. So the number of permit is 4, the number of available permits is 0 and there are currently 4 readers for "abc.txt".
+ * 4. Suppose one of the new readers made an error and closed 4 times and not once.
+ * 5. Now we have file "abc.txt" with 4 available permits, 4 max permits and 3 files writing. Now we could spawn more readers than intended i.e. >4.
+ * <p>
+ * This is the type of behaviour that keeping track of readers and the writer avoids.
+ * <p>
  * Fairness is ensured by instantiating the `Semaphores` and `ReentrantLocks`
  * with parameter `fair` set to `true`. They are implemented in such a way that
  * the underlying queue gives equal (i.e. fair amount of time to all clients to
  * requested files).
  * <p>
- * Additionally, attempting to open a file in a mode undefined by the
- * specification (i.e. the assessment instructions) results in failure which
- * here is basically returning of the empty `Optional`.
+ * Attempting to open a file in a mode undefined by the specification (i.e. the assessment instructions) results in
+ * failure which here is basically returning of the empty `Optional`.
  * <p>
- * <p>
- * FIXME track who opens a file for reading / writing: use thread id, ensure that if, say, 3 threads request READ mode, then one of them can't close 3 times
  *
  * @author nl253
  */
